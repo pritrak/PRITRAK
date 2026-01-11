@@ -1,437 +1,406 @@
-# ⚡ Classification Matrix V2.0 - Quick Reference Card
+# QUICK REFERENCE V2.0 - Classification System
 
-**TL;DR for engineers implementing the hardened matrix**
-
----
-
-## Score Ranges at a Glance
+## Classification Levels (Simple)
 
 ```
-┌──────────────────────────────┐
-│ 0-19    🟢 PUBLIC      → ALLOW      │
-│ 20-49   🔵 INTERNAL    → ALLOW+LOG  │
-│ 50-89   🟠 CONFIDENTIAL → WARN      │
-│ 90-100  🔴 RESTRICTED  → BLOCK     │
-└──────────────────────────────┘
+SCORE RANGE    |  CLASSIFICATION  |  RISK LEVEL      |  ACTION
+========================================================================
+0 - 19         |  PUBLIC          |  NONE            |  Allow all access
+20 - 49        |  INTERNAL        |  LOW             |  Log access
+50 - 89        |  CONFIDENTIAL    |  MEDIUM-HIGH     |  Restrict to dept
+90 - 100       |  RESTRICTED      |  CRITICAL        |  Block/Alert
 ```
 
 ---
 
-## Phase Quick Summary
+## Scoring Rules Quick Lookup
 
-| Phase | Duration | Input | Output | When to Use |
-|-------|----------|-------|--------|-------------|
-| **Phase 0** | <5ms | File path only | Instant RESTRICTED/PUBLIC | Auto-block extensions/filenames |
-| **Phase 1** | ~30ms | File path | 0-40 points | Filename, extension, directory context |
-| **Phase 2** | ~100ms | File content | 0-150+ points | Regex patterns + validators |
-| **Phase 2.5** | ~200ms | Snippet + labels | -30 to +20 adjustment | ONLY if 50 ≤ score < 90 |
-| **Phase 3** | ~50ms | File metadata | -40 to +40 adjustment | File type heuristics, language |
-| **Phase 4** | ~20ms | Combined score | Classification result | Final decision (always runs) |
+### Extension Rules (Phase 0)
 
-**Total time: <400ms per file**
+```
+EXTENSION      |  SCORE  |  DECISION        |  LATENCY
+=============================================================
+.key, .pem     |  100    |  Instant BLOCK   |  <1ms
+.p12, .pfx     |  100    |  Instant BLOCK   |  <1ms
+.gpg, .aes     |  100    |  Instant BLOCK   |  <1ms
+.env           |  100    |  Instant BLOCK   |  <1ms
+.sql           |  95     |  Instant BLOCK   |  <1ms
+.sql.bak       |  95     |  Instant BLOCK   |  <1ms
+.xlsx, .csv    |  +5     |  Continue        |  Continue to Phase 1
+.txt           |  0      |  Instant ALLOW   |  <1ms (if empty)
+.log           |  +3     |  Continue        |  Continue
+.tmp, .cache   |  0      |  Instant ALLOW   |  <1ms
+```
+
+### Filename Keywords (Phase 1)
+
+```
+KEYWORD              |  SCORE ADD  |  EXAMPLES
+=====================================================================
+password             |  +15        |  password.txt, pwd_2026.xlsx
+secret               |  +15        |  client_secrets.json
+api_key              |  +20        |  api_key_prod.env
+private_key          |  +20        |  id_rsa
+payroll              |  +12        |  payroll_2026_q1.csv
+salary               |  +12        |  salary_review.xlsx
+customer             |  +8         |  customers_list.csv
+invoice              |  +8         |  invoice_details.xlsx
+financial            |  +10        |  financial_report.pdf
+pii                  |  +18        |  pii_data.csv
+ssn                  |  +25        |  ssn_list.xlsx
+credit_card          |  +20        |  cc_numbers.txt
+```
+
+### Directory Context (Phase 1)
+
+```
+DIRECTORY            |  SCORE ADD  |  RATIONALE
+=====================================================================
+\\hr                  |  +10        |  HR department files
+\\finance             |  +12        |  Financial data
+\\legal               |  +10        |  Legal documents
+\\executive           |  +15        |  C-level sensitive
+\\secret              |  +20        |  Explicit
+\\classified          |  +20        |  Explicit
+```
+
+### Content Patterns (Phase 2)
+
+#### Regex Patterns
+
+```regex
+# US Credit Card (Visa, Mastercard, Amex)
+(?:4[0-9]{12}|5[1-5][0-9]{14}|3[47][0-9]{13})
+→ Score: +20 (if Luhn valid)
+
+# US Social Security Number (XXX-XX-XXXX)
+(?!000|666|9\d{2})\d{3}-(?!00)\d{2}-(?!0000)\d{4}
+→ Score: +25
+
+# Email Address
+[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}
+→ Score: +3 (per email)
+
+# Phone Number (US +1-XXX-XXX-XXXX)
+\+?1?[-.]?\(?[0-9]{3}\)?[-.]?[0-9]{3}[-.]?[0-9]{4}
+→ Score: +2 (per phone)
+```
+
+#### Validators
+
+```
+TYPE             |  VALIDATION METHOD
+======================================================================
+Credit Card      |  Luhn Algorithm (mod 10 checksum)
+SSN              |  Not 000-00-0000, 666-xx-xxxx, 9xx-xx-xxxx
+French NIR       |  13 digits with checksum: 97 - (concatenated % 97)
+IBAN             |  Mod-97 algorithm + valid country code
+Email            |  RFC 5322 (simplified)
+Phone            |  Length check (10-15 digits)
+```
+
+#### Pattern Weights
+
+```
+PATTERN                 |  WEIGHT  |  NOTES
+==================================================================
+Credit Card (Luhn OK)   |  +20     |  Only if Luhn passes
+SSN                     |  +25     |  High confidence
+French NIR              |  +35     |  Very high confidence
+IBAN                    |  +18     |  Bank account
+Keywords:
+  - password            |  +15
+  - api_key             |  +20
+  - secret              |  +15
+  - salary              |  +8
+  - employee            |  +5
+```
 
 ---
 
-## Scoring Quick Reference
+## Negative Context Filtering
 
-### Instant Block Patterns (Score = 100)
-
-```cpp
-AWS Key ID:           AKIA[0-9A-Z]{16}  // INSTANT BLOCK
-Private Key:          -----BEGIN.*PRIVATE KEY-----  // INSTANT BLOCK
-GitHub Token:         ghp_[0-9a-zA-Z]{36}  // INSTANT BLOCK
-Slack Token:          xoxb-[0-9]{10,13}-[0-9]{10,13}-[a-zA-Z0-9_-]{24,34}  // INSTANT BLOCK
-Stripe Live Key:      sk_live_[0-9a-zA-Z]{24}  // INSTANT BLOCK
-```
-
-### High-Weight Patterns (50-100 points)
+**IMPORTANT:** If pattern matches but context contains these keywords, reduce score by 50%
 
 ```
-French NIR:           +35 (with validation)
-Credit Card:          +20 (with Luhn check)
-US SSN:               +25 (with range validation)
-IBAN:                 +25 (with MOD-97 check)
-Database Connection:  +80
-JWT Token:            +50
-```
-
-### Medium-Weight Keywords (8-15 points)
-
-```
-English:
-  "password", "api key", "secret" → +15 each
-  "invoice", "salary", "customer" → +8 each
-
-French:
-  "mot de passe", "clé API" → +15 each
-  "facture", "salaire", "client" → +8 each
-```
-
-### Scoring Example: Payroll CSV
-
-```
-File: payroll_2026.csv
-
-Phase 1:  filename(+12) + extension(+5) + directory_hr(+10) = +27
-Phase 2:  ssn_match(+25 × 2) + keyword_salary(+8) = +66
-Phase 25: Score 93 → Skip (>90)
-Phase 3:  bulk_data(+30) = +30
-Total:    27 + 66 + 30 = 123 → Clamp to 100
-
-➡️  RESTRICTED (99 confidence)
-```
-
----
-
-## Negative Contexts (Auto-Downgrade)
-
-If a match appears within 200 chars of these words, **IGNORE THE MATCH**:
-
-```
-"example", "sample", "test", "fake", "dummy",
-"placeholder", "template", "demo", "mock",
-"how to", "tutorial", "guide", "documentation",
-"readme", "lorem ipsum"
+KEYWORD              |  REASON
+==================================================================
+example              |  Code example
+test                 |  Test data
+sample               |  Sample data
+fake                 |  Fake/dummy
+mock                 |  Mock for testing
+random               |  Placeholder
+dummy                |  Dummy value
+placeholder          |  Placeholder
+template             |  Template
 ```
 
 **Example:**
+
 ```
-Matches: Credit card "4532015112830366"
-Context: "Example credit card: 4532015112830366"
-Action: SKIP (negative context detected)
-```
+File: test_data.csv
+Content contains: 123-45-6789 (SSN pattern) in section "# FAKE TEST DATA"
 
----
-
-## Validator Quick Ref (C++)
-
-### Luhn (Credit Cards)
-```cpp
-bool ValidateLuhn(string num) {
-    // Double every 2nd digit from right, subtract 9 if > 9
-    // Sum all, check (sum % 10 == 0)
-    return (checksum % 10 == 0);
-}
-
-// Example: "4532015112830366" → VALID
-```
-
-### IBAN (European)
-```cpp
-bool ValidateIBAN(string iban) {
-    // Rearrange: move first 4 chars to end
-    // Convert letters to numbers: A=10, B=11, ..., Z=35
-    // Check: mod 97 == 1
-    return (remainder == 1);
-}
-
-// Example: "FR14 2004 1010 0505 0001 3M02 606" → VALID
-```
-
-### French NIR (Sécu)
-```cpp
-bool ValidateFrenchNIR(string nir) {
-    // Format: [1-2][01-12][01-31][DEPT][SEQ][ORG][KEY]
-    // If 15 digits: validate key = 97 - (number % 97)
-    // If 13 digits: format check only
-    return (formatOK && (len==13 || keyValid));
-}
-
-// Example: "1 85 05 17 962 123 456 78" → VALID
-```
-
-### US SSN
-```cpp
-bool ValidateSSN(string ssn) {
-    // Block: area={000, 666, 9xx}, group=00, serial=0000
-    return !(inBlockedRange);
-}
-
-// Example: "123-45-6789" → VALID
-// Example: "000-45-6789" → INVALID (area 000)
+Phase 2 calculation:
+  SSN match:        +25
+  Negative context: -12 (50% reduction for "fake" + "test")
+  Final:            +13
 ```
 
 ---
 
-## File Type Heuristics
+## French Data Patterns
 
-### Source Code (.py, .js, .cpp, .go)
+### NIR (Numéro d'Inscription Répertoire / Secu)
 
-```
-Rule: Halve PII scores, keep secrets at full weight
+**Format:** 1 (or 2) + 2 (month) + 2 or 4 (year) + 2 or 3 (dept) + 3 (commune) + 3 (order) + 2 (key)
 
-Reason: Developers put test card numbers in unit tests.
+**Example:** 1 75 056 001 123 456 78
 
-Example:
-  - Credit card regex matches in code → -50% penalty
-  - AWS key in code → FULL WEIGHT (still +100)
-```
-
-### CSV/Excel
-
-```
-Rule: If >100 rows, multiply total score by 1.5
-
-Reason: Bulk data exports are higher risk.
-
-Example:
-  - 5 employee records: score = 70
-  - 5000 employee records: score = 105 (RESTRICTED)
+**Regex:**
+```regex
+\b[12]\s?(?:0[1-9]|1[0-2])\s?(?:(?:19|20)\d{2}|\d{2})\s?(?:0[1-95]|[2-8]\d|9[0-5])\s?\d{3}\s?\d{3}(?:\s?\d{2})?\b
 ```
 
-### Archives (.zip, .rar, .7z)
-
+**Validation:**
 ```
-Rule: Scan internal filenames for keywords
-
-Example:
-  - Archive contains "password.txt" internally → +25
-  - Archive contains "database_backup.sql" → +30
+1. Extract 13 digits
+2. Calculate: key = 97 - (number % 97)
+3. Last 2 digits must match key
 ```
 
-### Documentation (.md, .txt, .rst)
+**Score:** +35 (if valid)
 
+### French IBAN
+
+**Format:** FR + 2 check digits + 5 bank code + 5 branch code + 11 account + 2 key
+
+**Example:** FR1420041010050500013M02606
+
+**Regex:**
+```regex
+FR[0-9]{2}[A-Z0-9]{23}
 ```
-Rule: Reduce PII scores by 40%, keep keywords
 
-Reason: Docs often contain examples and discussions.
-
-Example:
-  - "How to reset your password" → -50% on keyword
-```
+**Score:** +18 (if valid IBAN)
 
 ---
 
-## AI Sidecar Trigger & Logic
+## Implementation Checklist
 
-### When It Runs
+### Phase 0 (< 2ms)
+- [ ] Extension whitelist/blacklist
+- [ ] File size checks
+- [ ] Sensitive filenames detection
 
-```
-IF 50 ≤ score < 90:
-  CALL AI Sidecar with snippet
-ELSE:
-  Skip (score too high or low)
-```
+### Phase 1 (< 5ms)
+- [ ] Filename keyword scoring
+- [ ] Directory context scoring
+- [ ] File type heuristics
 
-### AI Labels
+### Phase 2 (< 30ms)
+- [ ] Regex pattern matching (credit cards, SSN, NIR, IBAN)
+- [ ] Luhn algorithm validation
+- [ ] French NIR validation
+- [ ] Negative context filtering
 
-| Label | Confidence | Action | Adjustment |
-|-------|-----------|--------|-------------|
-| `TestData` | >0.80 | DOWNGRADE | -30 points |
-| `CodeExample` | >0.85 | DOWNGRADE | -25 points |
-| `RealCredential` | >0.85 | UPGRADE | +20 points |
-| Uncertain | <0.75 | NO CHANGE | 0 points |
+### Phase 2.5 (optional, < 150ms)
+- [ ] GLiNER AI model call (only if 50 ≤ score < 90)
+- [ ] Timeout handling (conservative bias)
 
-### AI Request/Response
+### Phase 3 (< 10ms)
+- [ ] File type heuristics
+- [ ] Proximity boosting
+
+### Phase 4 (< 3ms)
+- [ ] Score clamping [0, 100]
+- [ ] Classification mapping
+
+---
+
+## Real-Time Dashboard Integration
+
+### WebSocket Message Format
 
 ```json
-// REQUEST
 {
-  "snippet": "password = 'TestPassword123'",
-  "labels": ["RealCredential", "TestData", "CodeExample"]
-}
-
-// RESPONSE
-{
-  "labels": {
-    "TestData": 0.94,
-    "RealCredential": 0.06,
-    "CodeExample": 0.15
-  }
+  "type": "classification_update",
+  "file_path": "C:\\Users\\PC\\Desktop\\Anti-Phishing\\testt.txt",
+  "classification": "PUBLIC",
+  "score": 0,
+  "confidence": 100,
+  "explanation": "Empty file, no patterns detected",
+  "risk_level": "NONE",
+  "elapsed_ms": 2,
+  "timestamp": "2026-01-11T13:36:45.000Z"
 }
 ```
 
----
+### Database Schema
 
-## Gotchas & Edge Cases
-
-### 1. **Entropy-Based Detection**
-
-```
-Entropy > 7.5 in small file (<5MB) → Likely encrypted/obfuscated
-Score: +50 (flag for manual review)
-Reason: Real credentials look random
-```
-
-### 2. **Multiple Matching Patterns**
-
-```
-IF keyword_count >= 3:
-  BOOST confidence by 40%
-  
-Example:
-  - "password" + "secret" + "api_key" in same file
-  - Final confidence *= 1.4
-```
-
-### 3. **Language Detection**
-
-```
-IF French keywords > English keywords:
-  USE French patterns (NIR, IBAN, phone formats)
-ELSE:
-  USE English patterns (SSN, IBAN, international phones)
-  
-Note: Apply BOTH if bilingual content detected
-```
-
-### 4. **Fallback for AI Unavailable**
-
-```
-IF AI sidecar timeout (>200ms):
-  Use conservative approach: BLOCK
-  Log incident for review
-  
-Reason: Safety over convenience
-```
-
-### 5. **False Positive Reduction**
-
-```
-IF negative_context found:
-  Score = 0 (completely ignore match)
-  
-Example: "Example: 4532015112830366 (test card)"
-  - Match: Credit card
-  - Context: "Example" + "test card"
-  - Action: SKIP
-  - Result: Not counted toward score
-```
-
----
-
-## Common Mistakes to Avoid
-
-❌ **WRONG:**
-```cpp
-if (regex_match(credit_card)) {
-    score += 20;  // Always add score
-}
-```
-
-✅ **RIGHT:**
-```cpp
-if (regex_match(credit_card) && validators.luhn(match) 
-    && !isInNegativeContext(match)) {
-    score += 20;
-}
-```
-
----
-
-❌ **WRONG:**
-```cpp
-if (score >= 50) return RESTRICTED;  // Boolean logic
-```
-
-✅ **RIGHT:**
-```cpp
-if (score >= 90) return RESTRICTED;
-else if (score >= 50) return CONFIDENTIAL;
-else if (score >= 20) return INTERNAL;
-else return PUBLIC;  // Cumulative scoring
-```
-
----
-
-❌ **WRONG:**
-```cpp
-pattern_regex = R"(\bAKIA\d{16}\b)"  // Loose digit match
-```
-
-✅ **RIGHT:**
-```cpp
-pattern_regex = R"(\bAKIA[0-9A-Z]{16}\b)"  // Exact character class
-```
-
----
-
-## Testing Checklist
-
-```
-☐ Unit tests: All validators (Luhn, IBAN, NIR, SSN)
-☐ Integration: Real payroll file → RESTRICTED (>90)
-☐ Negative context: README with fake examples → INTERNAL (<50)
-☐ File type: Source code with test card → INTERNAL (<50)
-☐ AI sidecar: Ambiguous zone (50-89) → Calls AI, adjusts
-☐ Fallback: AI timeout → Conservative (BLOCK)
-☐ Performance: Single file <400ms p95
-☐ Memory: Steady state <150MB
-☐ Language detection: Mixed en/fr → Both keyword sets
-☐ Edge case: Empty file → PUBLIC (0 score)
-```
-
----
-
-## Deployment Commands
-
-### Build C++ Agent
-```bash
-mkdir build && cd build
-cmake ..
-make -j4
-./pritrak-agent test.csv
-```
-
-### Run Go Sidecar
-```bash
-cd go_sidecar
-go mod download
-go run main.go handler.go gliner_client.go
-# Listens on localhost:5555
-```
-
-### Test Everything
-```bash
-cd build
-ctest --output-on-failure
-```
-
-### Load Policy
-```bash
-./pritrak-agent test.csv --policy data/policy_v2.json
+```sql
+INSERT OR REPLACE INTO event_logs 
+(file_path, classification, score, confidence, explanation, risk_level, elapsed_ms, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP);
 ```
 
 ---
 
 ## Performance Targets
 
-| Metric | Target | Expected |
-|--------|--------|----------|
-| **Per-file latency (p95)** | <400ms | 220ms |
-| **False positives** | <3% | <1.5% |
-| **False negatives** | <2% | <1% |
-| **Accuracy** | >92% | 96% |
-| **Memory (steady)** | <150MB | 80MB |
-| **Regex compilation** | <100ms | 40ms |
-
----
-
-## V2 Improvements Summary
-
 ```
-V1 → V2 Changes:
-
-1. Scoring:       Boolean IF/THEN → Cumulative 0-100
-2. False Pos:     3-5% → <1.5% (-70%)
-3. French Regex:  60% coverage → 98% coverage
-4. AI:            None → GLiNER Phase 2.5
-5. Validation:    Regex only → Luhn/IBAN/NIR checks
-6. Context:       Limited → Full proximity + negative
-7. Performance:   400ms → 220ms (+45% faster)
-8. Accuracy:      94% → 96% (+2%)
+Operations          |  Target  |  Measurement
+==================================================================
+Phase 0             |  < 2ms   |  90% of files
+Phase 1             |  < 5ms   |  Per file
+Phase 2             |  < 30ms  |  Per file
+Phase 2.5 (AI)      |  < 150ms |  10% of ambiguous files
+Phase 3             |  < 10ms  |  Per file
+Phase 4             |  < 3ms   |  Per file
+---
+Total p95           |  < 50ms  |  User won't notice
+WebSocket push      |  < 10ms  |  Real-time feel
+Database insert     |  < 5ms   |  SQLite write
+Dashboard render    |  < 10ms  |  React update
+---
+End-to-end          |  < 100ms |  File creation to display
 ```
 
 ---
 
-## Need More Details?
+## Scoring Formula
 
-- **Full Spec:** `CLASSIFICATION-MATRIX-V2.md`
-- **Implementation:** `IMPLEMENTATION-GUIDE-V2.md`
-- **Policy Config:** `data/policy_v2.json`
+```
+Final Score = Phase0_FastFilter()
+            + Phase1_PreAnalysis()
+            + Phase2_ContentPatterns()
+            + Phase25_AISidecar()  [optional]
+            + Phase3_ContextLogic()
+            - NegativeContextReduction()
+
+Clamped to [0, 100]
+```
 
 ---
 
-**Last Updated:** January 11, 2026  
-**Version:** 2.0 (Production-Ready)  
-**Maintainer:** PRITRAK Security Team
+## Examples
+
+### Example 1: Empty File (testt.txt)
+
+```
+T+0ms:   User creates testt.txt (0 bytes)
+T+2ms:   Phase 0: fileSize == 0
+         → INSTANT ALLOW
+         → Score: 0
+         → Classification: PUBLIC
+         → Confidence: 100%
+
+Result: PUBLIC (0/100) NONE ✅
+```
+
+### Example 2: Private Key
+
+```
+T+0ms:   User creates private_key.pem
+T+1ms:   Phase 0: extension == .pem
+         → INSTANT BLOCK
+         → Score: 100
+         → Classification: RESTRICTED
+
+Result: RESTRICTED (100/100) CRITICAL ✅
+```
+
+### Example 3: Payroll CSV
+
+```
+T+0ms:   User creates payroll_2026.csv
+         Content: Employee,SSN,Salary
+                 Alice,123-45-6789,85000
+
+T+2ms:   Phase 0: .csv file
+         → No fast decision (continue)
+         → Score: 0
+
+T+7ms:   Phase 1: filename "payroll"
+         → Score += 12
+         → Score: 12
+
+T+45ms:  Phase 2: Content patterns
+         - SSN pattern found: 123-45-6789
+         - Luhn validation: PASS
+         → Score += 25
+         - Keyword "Salary"
+         → Score += 8
+         → Score: 45
+         - Negative context: NONE
+
+T+50ms:  Phase 3: Context
+         - CSV file with 2 rows
+         → Score += 5 (small dataset)
+         → Score: 50
+
+T+53ms:  Phase 4: Final Decision
+         - Score: 50 >= 50
+         → Classification: CONFIDENTIAL
+         → Risk Level: MEDIUM-HIGH
+
+Result: CONFIDENTIAL (50/100) MEDIUM-HIGH ✅
+```
+
+### Example 4: Modified Payroll (50→90)
+
+```
+T+0ms:   User modifies payroll_2026.csv
+         Adds 100 more employees with full SSNs
+
+T+50ms:  Phase 2: Content patterns
+         - 100x SSN patterns found
+         - All pass Luhn
+         → Score += (100 * 25) BUT... clamped at different rates
+         - Keyword "Salary" appears 100x
+         → Score += (100 * 1) [diminishing return]
+
+T+60ms:  Phase 3: Context
+         - CSV file with 100 rows (bulk export)
+         → Score += 30
+
+T+65ms:  Phase 4: Final Decision
+         - Score: 90+ ≥ 90
+         → Classification: RESTRICTED
+         → Risk Level: CRITICAL
+
+Result: RESTRICTED (95/100) CRITICAL ✅
+```
+
+---
+
+## Debugging Tips
+
+**File not classified?**
+1. Check if file path matches Windows filter (not Temp, not AppData)
+2. Check if USN Journal is enabled on volume
+3. Check if C++ service is running
+
+**Wrong classification?**
+1. Run file through Phase 0-4 manually
+2. Check regex patterns (use online regex tester)
+3. Check negative context filtering
+4. Check Phase 2.5 AI sidecar if score 50-90
+
+**Slow classification?**
+1. Check Phase 2 latency (usually <30ms)
+2. Check Phase 2.5 AI timeout (set to 100ms max)
+3. Check file read latency (large files)
+
+---
+
+## References
+
+- **Full Implementation:** AI-IMPLEMENTATION-PROMPT.md
+- **C++ Code Template:** IMPLEMENTATION-GUIDE-V2.md
+- **Deployment:** DEPLOYMENT-CHECKLIST-V2.md
+
+---
+
+*Last Updated: January 11, 2026*
